@@ -40,11 +40,20 @@ then enables.
 
 ## Install
 
-**AUR:**
+**Arch package (from the latest release):**
 
 ```bash
-yay -S omaplug
+sudo pacman -U https://github.com/stewartjarod/omaplug/releases/download/v0.1.0/omaplug-0.1.0-1-any.pkg.tar.zst
 ```
+
+**Build it yourself with makepkg:**
+
+```bash
+git clone https://github.com/stewartjarod/omaplug
+cd omaplug/aur && makepkg -si
+```
+
+An AUR package is coming.
 
 **From source:**
 
