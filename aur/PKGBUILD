@@ -11,7 +11,7 @@ optdepends=('gum: nicer confirmation prompts')
 conflicts=('omaplug')
 replaces=('omaplug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('528fc1a6aa7e07d8cc837029b85eece498917c6c505ffa5b4ed2fd9d306cf3fd')
 
 package() {
   cd "$pkgname-$pkgver"

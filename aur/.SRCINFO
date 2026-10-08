@@ -1,6 +1,6 @@
 pkgbase = omarket
 	pkgdesc = Search, install, and audit Omarchy shell plugins from the community marketplace, pinned to verified commits
-	pkgver = 0.3.0
+	pkgver = 0.3.1
 	pkgrel = 1
 	url = https://github.com/stewartjarod/omarket
 	arch = any
@@ -13,7 +13,7 @@ pkgbase = omarket
 	optdepends = gum: nicer confirmation prompts
 	conflicts = omaplug
 	replaces = omaplug
-	source = omarket-0.3.0.tar.gz::https://github.com/stewartjarod/omarket/archive/refs/tags/v0.3.0.tar.gz
-	sha256sums = 6ef1c8571439fbf8cd333f5b4dcc419983747315980950fded341da16f016af2
+	source = omarket-0.3.1.tar.gz::https://github.com/stewartjarod/omarket/archive/refs/tags/v0.3.1.tar.gz
+	sha256sums = 528fc1a6aa7e07d8cc837029b85eece498917c6c505ffa5b4ed2fd9d306cf3fd
 
 pkgname = omarket
