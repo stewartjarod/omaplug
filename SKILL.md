@@ -52,7 +52,16 @@ omaplug install <id> --dry-run                   # show what would happen
 omaplug audit --json
 ```
 
-Statuses: `verified` (running the verified commit), `drifted` (running a different commit, e.g. after `omarchy plugin update`), `unreviewed`, `unlisted`, `repo-mismatch` (installed from a different repo than the listing — flag this to the user).
+Statuses:
+- `verified` — running the exact commit the marketplace verified.
+- `ahead` — the verified commit plus the user's own commits on top. Deliberate, not a problem.
+- `fork` — installed under a different id but descends from a listed plugin (matched by git remote). `base` is the listing; `relation`/`aheadBy`/`behindBy` say how it compares. Usually the user's own fork.
+- `behind` — older than the verified commit; `omarchy plugin update <id>` would catch it up.
+- `drifted` — different code than verified, with no ancestry relationship (e.g. after `omarchy plugin update` pulled unverified commits). Mention it.
+- `unreviewed`, `unlisted` — no verified commit exists, or not in the marketplace at all.
+- `repo-mismatch` — installed from a different repo than the listing and the code is unrelated. Flag this to the user.
+
+`source` and `branch` show where the running code comes from (the remote the checked-out branch tracks).
 
 ## Manage installed plugins
 

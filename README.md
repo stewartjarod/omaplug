@@ -28,8 +28,10 @@ omaplug closes that gap:
 - **Four trust levels, not two.** `verified`, `stale` (a verified commit exists
   but upstream moved), `unreviewed`, and `builtin`.
 - **`omaplug audit`** tells you which installed plugins are running verified
-  code, which have drifted (e.g. after `omarchy plugin update`), and which were
-  installed from a different repo than the listing claims.
+  code, which carry your own commits on top of it, which are forks of a listed
+  plugin under a new id, which have drifted (e.g. after `omarchy plugin
+  update`), and which were installed from a different repo than the listing
+  claims.
 - **Agent-friendly.** Every read command has `--json`, nothing prompts without a
   terminal, and a ready-made agent skill ships with it.
 
@@ -92,8 +94,27 @@ that exists. Installs made directly with `omarchy plugin add` (or omaplug) are
 not counted, and omaplug never reports anything back. `info` also shows
 listing views and GitHub stars.
 
-`audit --strict` exits `2` if anything installed is not running a verified
-commit — useful in a hook or a cron job.
+### Audit
+
+```console
+$ omaplug audit
+jarod.protonvpn          on   fork      of tharin.protonvpn: verified commit + 22 of your own
+                                        from https://github.com/you/omarchy-protonvpn (jarod)
+crmne.mpris              on   verified  running the commit the marketplace verified
+```
+
+| Status | Meaning |
+|---|---|
+| `verified` | Running the exact commit the marketplace verified |
+| `ahead` | The verified commit plus your own commits on top |
+| `fork` | A different id whose git remotes point at a listed plugin; shows how it compares |
+| `behind` | Older than the verified commit |
+| `drifted` | Different code from what was verified, e.g. after `omarchy plugin update` |
+| `unreviewed` / `unlisted` | No verified commit exists / not in the marketplace |
+| `repo-mismatch` | Installed from a different repo than the listing, and the code is unrelated |
+
+`audit --strict` exits `2` if anything is not `verified`, `ahead`, or `fork` —
+useful in a hook or a cron job.
 
 ## Using it from a coding agent
 

@@ -245,7 +245,8 @@ installed_json() {
         head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
         origin=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
         jq -cn --arg id "$id" --arg dir "${dir%/}" --arg head "$head" --arg origin "$origin" \
-          '{id: $id, dir: $dir, head: $head, origin: $origin}'
+          '{id: $id, dir: $dir, head: $head, origin: $origin, remotes: ($ARGS.positional | map(select(. != "")))}' \
+          --args $(git -C "$dir" remote 2>/dev/null | while read -r r; do git -C "$dir" remote get-url "$r"; done)
       done | jq -cs '.'
     )
   fi
@@ -595,6 +596,32 @@ EOF
   fi
 }
 
+# How the installed checkout relates to a commit: same, ahead, behind,
+# diverged, or unknown when the commit is not present locally.
+git_relation() {
+  local dir="$1" commit="$2" head="$3"
+  [[ -n $commit && -n $head ]] || { echo "unknown 0 0"; return; }
+  [[ $head == "$commit" ]] && { echo "same 0 0"; return; }
+  git -C "$dir" cat-file -e "$commit^{commit}" 2>/dev/null || { echo "unknown 0 0"; return; }
+  local ahead behind
+  ahead=$(git -C "$dir" rev-list --count "$commit..$head" 2>/dev/null || echo 0)
+  behind=$(git -C "$dir" rev-list --count "$head..$commit" 2>/dev/null || echo 0)
+  if ((behind == 0)); then echo "ahead $ahead 0"
+  elif ((ahead == 0)); then echo "behind 0 $behind"
+  else echo "diverged $ahead $behind"; fi
+}
+
+# The remote URL the checked-out branch tracks, falling back to origin. This is
+# where the running code actually comes from, which for a fork is not origin.
+git_source() {
+  local dir="$1" upstream remote
+  upstream=$(git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+  remote="${upstream%%/*}"
+  [[ -n $remote ]] || remote="origin"
+  printf '%s\t%s\n' "$(git -C "$dir" remote get-url "$remote" 2>/dev/null || true)" \
+    "$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "(detached)")"
+}
+
 cmd_audit() {
   local json=false strict=false
   while (($# > 0)); do
@@ -606,38 +633,61 @@ cmd_audit() {
   done
 
   ensure_index
-  local installed report
+  local installed
   installed=$(installed_json)
 
-  report=$(
+  # Match each installed plugin to a listing: by id first, then, for a renamed
+  # fork, by any of its git remotes pointing at a listed repository.
+  local matched
+  matched=$(
     jq -c --argjson installed "$installed" '
       def norm: ascii_downcase | sub("/+$"; "") | sub("\\.git$"; "");
-      (.plugins | map({key: .id, value: .}) | from_entries) as $cat
+      (.plugins | map({key: .id, value: .}) | from_entries) as $byId
+      | (.plugins | map(select(.repo != "")) | group_by(.repo | norm) | map({key: (.[0].repo | norm), value: .[0]}) | from_entries) as $byRepo
       | [
           $installed[]
           | . as $p
-          | $cat[$p.id] as $c
+          | ($byId[$p.id] // null) as $c
+          | (if $c == null then ([$p.remotes[] | norm | $byRepo[.] // empty] | first // null) else null end) as $f
+          | ($c // $f) as $l
           | {
-              id: $p.id,
-              enabled: $p.enabled,
-              installedCommit: $p.head,
-              origin: $p.origin,
+              id: $p.id, dir: $p.dir, enabled: $p.enabled, installedCommit: $p.head,
               listed: ($c != null),
-              trust: ($c.trust // null),
-              verifiedCommit: ($c.verifiedCommit // ""),
-              repo: ($c.repo // "")
+              base: ($l.id // null),
+              trust: ($l.trust // null),
+              verifiedCommit: ($l.verifiedCommit // ""),
+              repo: ($l.repo // ""),
+              remotes: $p.remotes
             }
-          | .status = (
-              if .listed | not then "unlisted"
-              elif .origin != "" and (.origin | norm) != (.repo | norm) then "repo-mismatch"
-              elif .installedCommit == "" then "unknown"
-              elif .verifiedCommit != "" and .installedCommit == .verifiedCommit then "verified"
-              elif .verifiedCommit != "" then "drifted"
-              else "unreviewed" end
-            )
         ]
     ' "$INDEX"
   )
+
+  local report="[]" row dir head verified relation ahead behind source branch status
+  while IFS= read -r row; do
+    dir=$(jq -r '.dir' <<<"$row")
+    head=$(jq -r '.installedCommit' <<<"$row")
+    verified=$(jq -r '.verifiedCommit' <<<"$row")
+    read -r relation ahead behind < <(git_relation "$dir" "$verified" "$head")
+    IFS=$'\t' read -r source branch < <(git_source "$dir")
+
+    status=$(jq -r --arg rel "$relation" '
+      if .base == null then "unlisted"
+      elif .installedCommit == "" then "unknown"
+      elif .verifiedCommit == "" then "unreviewed"
+      elif .listed | not then "fork"
+      elif $rel == "same" then "verified"
+      elif $rel == "ahead" then "ahead"
+      elif $rel == "behind" then "behind"
+      elif (.remotes | map(ascii_downcase | sub("\\.git$"; "")) | index(.repo | ascii_downcase) | not) then "repo-mismatch"
+      else "drifted" end
+    ' <<<"$row")
+
+    report=$(jq -c --argjson row "$row" --arg status "$status" --arg rel "$relation" \
+      --argjson ahead "$ahead" --argjson behind "$behind" --arg source "$source" --arg branch "$branch" '
+      . + [$row + {status: $status, relation: $rel, aheadBy: $ahead, behindBy: $behind, source: $source, branch: $branch} | del(.dir)]
+    ' <<<"$report")
+  done < <(jq -c '.[]' <<<"$matched")
 
   if $json; then
     jq '.' <<<"$report"
@@ -645,22 +695,38 @@ cmd_audit() {
     if [[ $(jq 'length' <<<"$report") == 0 ]]; then
       echo "No community plugins installed."
     fi
-    local id enabled status commit verified
-    while IFS=$'\t' read -r id enabled status commit verified; do
-      local label
+    local id enabled base commit
+    while IFS=$'\t' read -r id enabled status relation ahead behind commit verified base source branch; do
+      local color detail=""
       case "$status" in
-      verified) label="${C_GREEN}verified${C_RESET}      running the commit the marketplace verified" ;;
-      drifted) label="${C_YELLOW}drifted${C_RESET}       running ${commit:0:12}, verified is ${verified:0:12}" ;;
-      unreviewed) label="${C_RED}unreviewed${C_RESET}    no verified commit exists" ;;
-      unlisted) label="${C_DIM}unlisted${C_RESET}      not in the marketplace" ;;
-      repo-mismatch) label="${C_RED}repo-mismatch${C_RESET} installed from a different repo than the listing" ;;
-      *) label="unknown       not a git checkout" ;;
+      verified) color="${C_GREEN}" detail="running the commit the marketplace verified" ;;
+      ahead) color="${C_GREEN}" detail="verified commit + $ahead of your own" ;;
+      behind) color="${C_YELLOW}" detail="$behind commits older than the verified one" ;;
+      fork)
+        color="${C_CYAN}"
+        case "$relation" in
+        same) detail="of $base, at its verified commit" ;;
+        ahead) detail="of $base: verified commit + $ahead of your own" ;;
+        behind) detail="of $base, $behind commits behind its verified commit" ;;
+        diverged) detail="of $base, diverged ($ahead ahead, $behind behind its verified commit)" ;;
+        *) detail="of $base; verified commit not in local history" ;;
+        esac
+        ;;
+      drifted) color="${C_YELLOW}" detail="running ${commit:0:12}, verified is ${verified:0:12} ($relation)" ;;
+      unreviewed) color="${C_RED}" detail="no verified commit exists" ;;
+      unlisted) color="${C_DIM}" detail="not in the marketplace" ;;
+      repo-mismatch) color="${C_RED}" detail="code is unrelated to the listing's repo" ;;
+      *) color="" detail="not a git checkout" ;;
       esac
-      printf '%s%-45s%s %s  %s\n' "$C_BOLD" "$id" "$C_RESET" "$([[ $enabled == true ]] && echo "on " || echo "off")" "$label"
-    done < <(jq -r '.[] | [.id, .enabled, .status, .installedCommit, .verifiedCommit] | @tsv' <<<"$report")
+      printf '%s%-40s%s %s  %s%-13s%s %s\n' "$C_BOLD" "$id" "$C_RESET" "$([[ $enabled == true ]] && echo "on " || echo "off")" "$color" "$status" "$C_RESET" "$detail"
+      if [[ -n $source && $branch != "(detached)" ]] && [[ $status == fork || $status == ahead || $status == unlisted ]]; then
+        printf '%s%-40s      %-13s from %s (%s)%s\n' "$C_DIM" "" "" "${source%.git}" "$branch" "$C_RESET"
+      fi
+    done < <(jq -r '.[] | [.id, .enabled, .status, .relation, .aheadBy, .behindBy, .installedCommit, .verifiedCommit, (.base // ""), .source, .branch] | @tsv' <<<"$report")
   fi
 
-  if $strict && jq -e 'any(.[]; .status != "verified")' <<<"$report" >/dev/null; then
+  # Your own commits on top of verified code are a deliberate choice, not drift.
+  if $strict && jq -e 'any(.[]; .status | IN("verified", "ahead", "fork") | not)' <<<"$report" >/dev/null; then
     exit 2
   fi
 }
