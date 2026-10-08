@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.1"
+VERSION="0.3.2"
 
 CATALOG_URL="${OMARKET_CATALOG_URL:-https://plugins.omarchy.org/catalog.json}"
 STATS_URL="${OMARKET_STATS_URL:-https://api.omarchyplugins.com/v1/stats}"
@@ -529,6 +529,55 @@ confirm() {
   fi
 }
 
+# Wait until the shell answers IPC again, up to ~10s.
+wait_for_shell() {
+  local i
+  for ((i = 0; i < 20; i++)); do
+    omarchy-shell shell ping >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# plugin_state <id>: prints "enabled", "disabled", or "unknown" (not
+# discovered yet, or the shell is not answering).
+plugin_state() {
+  omarchy plugin list --json 2>/dev/null |
+    jq -r --arg id "$1" 'map(select(.id == $id))[0] | if . == null then "unknown" elif .enabled then "enabled" else "disabled" end' 2>/dev/null ||
+    echo "unknown"
+}
+
+# Enable a freshly installed plugin. A timeout from the shell does not mean the
+# request failed: the shell may still apply it once it finishes loading. So
+# after any error, wait for the shell, look at what actually happened, and only
+# retry if the plugin really is not enabled.
+enable_plugin() {
+  local id="$1" section="$2" attempt out state
+  local -a args=("$id")
+  [[ -n $section ]] && args+=(--section "$section")
+
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    [[ $(plugin_state "$id") != "unknown" ]] && break
+    sleep 0.5
+  done
+
+  for attempt in 1 2 3; do
+    if out=$(omarchy plugin enable "${args[@]}" 2>&1); then
+      echo "$out"
+      return 0
+    fi
+    wait_for_shell || true
+    state=$(plugin_state "$id")
+    if [[ $state == "enabled" ]]; then
+      echo "Enabled $id (the shell confirmed it late)"
+      return 0
+    fi
+    warn "enabling $id failed (attempt $attempt of 3): ${out:-no output}"
+    sleep 1
+  done
+  fail "$id is installed but could not be enabled: ${out:-no output}. Try again with: omarchy plugin enable ${args[*]}"
+}
+
 cmd_install() {
   local id="" enable=false section="" latest=false allow_unverified=false dry_run=false yes=false
   while (($# > 0)); do
@@ -637,10 +686,20 @@ EOF
     confirm "Install $id?" || fail "aborted"
   fi
 
-  # Land it disabled so a pin can be applied before anything runs.
-  omarchy plugin add "$url" --yes >&2 || fail "omarchy plugin add failed"
+  # The shell can take longer than omarchy-shell's 2s IPC default to answer
+  # while it loads a plugin it just discovered. Give every call here more room.
+  export OMARCHY_SHELL_IPC_TIMEOUT="${OMARCHY_SHELL_IPC_TIMEOUT:-10s}"
 
   local dir="$PLUGINS_DIR/$id"
+
+  # Land it disabled so a pin can be applied before anything runs. omarchy
+  # plugin add finishes by asking the shell to rescan; if only that step fails,
+  # the plugin is in place and we carry on.
+  if ! omarchy plugin add "$url" --yes >&2; then
+    [[ -d $dir ]] || fail "omarchy plugin add failed"
+    warn "omarchy plugin add reported an error after adding $id; continuing"
+  fi
+
   [[ -d $dir ]] || fail "installed, but the plugin id did not match '$id'; check omarchy plugin list"
 
   if [[ -n $pin ]]; then
@@ -658,16 +717,7 @@ EOF
   fi
 
   if $enable; then
-    local attempt
-    for ((attempt = 0; attempt < 40; attempt++)); do
-      omarchy plugin list --json 2>/dev/null | jq -e --arg id "$id" 'any(.[]; .id == $id)' >/dev/null && break
-      sleep 0.05
-    done
-    if [[ -n $section ]]; then
-      omarchy plugin enable "$id" --section "$section"
-    else
-      omarchy plugin enable "$id"
-    fi
+    enable_plugin "$id" "$section"
   else
     echo "Installed $id (disabled). Enable it with: omarchy plugin enable $id"
   fi
