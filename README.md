@@ -45,7 +45,7 @@ then enables.
 **Arch package (from the latest release):**
 
 ```bash
-sudo pacman -U https://github.com/stewartjarod/omaplug/releases/download/v0.1.0/omaplug-0.1.0-1-any.pkg.tar.zst
+sudo pacman -U https://github.com/stewartjarod/omaplug/releases/download/v0.2.0/omaplug-0.2.0-1-any.pkg.tar.zst
 ```
 
 **Build it yourself with makepkg:**

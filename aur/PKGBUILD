@@ -9,7 +9,7 @@ license=('MIT')
 depends=('bash' 'jq' 'curl' 'git' 'coreutils')
 optdepends=('gum: nicer confirmation prompts')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('95ef9cb5e03687ff80b411206b273f5f93e25e89d889db2140c660b3b090b9f6')
+sha256sums=('fc453398310a714c539eab314c4952755b300ff74a96177c256a13fea7b962ed')
 
 package() {
   cd "$pkgname-$pkgver"

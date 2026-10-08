@@ -1,6 +1,6 @@
 pkgbase = omaplug
 	pkgdesc = Search, install, and audit Omarchy shell plugins from the community marketplace, pinned to verified commits
-	pkgver = 0.1.0
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/stewartjarod/omaplug
 	arch = any
@@ -11,7 +11,7 @@ pkgbase = omaplug
 	depends = git
 	depends = coreutils
 	optdepends = gum: nicer confirmation prompts
-	source = omaplug-0.1.0.tar.gz::https://github.com/stewartjarod/omaplug/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = 95ef9cb5e03687ff80b411206b273f5f93e25e89d889db2140c660b3b090b9f6
+	source = omaplug-0.2.0.tar.gz::https://github.com/stewartjarod/omaplug/archive/refs/tags/v0.2.0.tar.gz
+	sha256sums = fc453398310a714c539eab314c4952755b300ff74a96177c256a13fea7b962ed
 
 pkgname = omaplug
