@@ -1,0 +1,702 @@
+#!/bin/bash
+
+# omaplug — search, inspect, install, and audit Omarchy shell plugins from the
+# community marketplace (https://plugins.omarchy.org).
+#
+# Built for people and coding agents alike: every read command takes --json,
+# nothing prompts unless a terminal is attached, and installs default to the
+# exact commit the marketplace verified rather than whatever upstream HEAD is.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+CATALOG_URL="${OMAPLUG_CATALOG_URL:-https://plugins.omarchy.org/catalog.json}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omaplug"
+RAW_CATALOG="$CACHE_DIR/catalog.json"
+INDEX="$CACHE_DIR/index.json"
+TTL_HOURS="${OMAPLUG_TTL_HOURS:-24}"
+MAX_BYTES=$((64 * 1024 * 1024))
+PLUGINS_DIR="$HOME/.config/omarchy/plugins"
+
+if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+  C_BOLD=$'\e[1m' C_DIM=$'\e[2m' C_RESET=$'\e[0m'
+  C_GREEN=$'\e[32m' C_YELLOW=$'\e[33m' C_RED=$'\e[31m' C_CYAN=$'\e[36m'
+else
+  C_BOLD="" C_DIM="" C_RESET="" C_GREEN="" C_YELLOW="" C_RED="" C_CYAN=""
+fi
+
+fail() {
+  echo "omaplug: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "omaplug: $*" >&2
+}
+
+interactive() {
+  [[ -t 0 && -t 1 ]]
+}
+
+need() {
+  local cmd
+  for cmd in "$@"; do
+    command -v "$cmd" >/dev/null 2>&1 || fail "missing dependency: $cmd"
+  done
+}
+
+usage() {
+  cat <<EOF
+omaplug $VERSION — Omarchy plugin marketplace from the command line
+
+Usage:
+  omaplug search [query...] [options]   Search the marketplace
+  omaplug info <id> [--json]            Show one plugin in detail
+  omaplug install <id> [options]        Install a plugin (pinned to its verified commit)
+  omaplug audit [--json] [--strict]     Check installed plugins against what was verified
+  omaplug categories [--json]           List categories, kinds, and top tags
+  omaplug refresh                       Re-download the marketplace catalog
+  omaplug skill [--install]             Print (or install) the agent skill for coding agents
+
+Search options:
+  -t, --trust <level>     verified | stale | unreviewed | builtin | any (default: any)
+  -c, --category <name>   Filter by category (case-insensitive)
+  -k, --kind <name>       Filter by kind, e.g. "bar widget", overlay, service
+      --tag <tag>         Filter by tag (repeatable)
+  -a, --all               Include listings that cannot be installed with omarchy plugin add
+  -i, --installed         Only plugins that are installed here
+  -s, --sort <key>        relevance | stars | updated | added | name
+                          (default: relevance with a query, stars without)
+  -n, --limit <n>         Max results (default: 20, 0 for no limit)
+      --json              Machine-readable output
+
+Install options:
+      --enable            Enable after installing
+      --section <s>       Bar section for widgets: left | center | right
+      --latest            Install upstream HEAD instead of the verified commit
+      --allow-unverified  Permit installing code the marketplace has not verified
+      --dry-run           Print what would happen and exit
+  -y, --yes               Do not prompt (required when no terminal is attached)
+
+Trust levels:
+  verified     The marketplace verified the current upstream commit.
+  stale        A commit was verified, but upstream has moved past it. omaplug
+               installs the verified commit unless you pass --latest.
+  unreviewed   No verified commit exists.
+  builtin      Ships with Omarchy; enable it with omarchy plugin enable.
+
+Environment:
+  OMAPLUG_CATALOG_URL   Catalog to read (default: $CATALOG_URL)
+  OMAPLUG_TTL_HOURS     Hours before the cached catalog is refreshed (default: 24)
+  OMAPLUG_OFFLINE=1     Never fetch; use the cached catalog only
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Catalog cache
+# ---------------------------------------------------------------------------
+
+# Reduce the raw marketplace catalog to the fields omaplug uses, with a derived
+# trust level, so every later query parses a small file instead of ~5 MB.
+build_index() {
+  local raw="$1" out="$2"
+  jq -c '
+    def s: if type == "string" then . else "" end;
+    {
+      generatedAt: (.generatedAt | s),
+      plugins: [
+        .plugins[]
+        | select(type == "object" and (.id | type) == "string" and (.id | test("^[A-Za-z0-9._-]{1,200}$")))
+        | {
+            id,
+            name: ((.name | s) as $n | if $n == "" then .id else $n end),
+            description: (.description | s),
+            author: (.author | s),
+            category: (.category | s),
+            kind: (.kind | s),
+            tags: ([(.tags // [])[] | select(type == "string")]),
+            stars: ((.stars // 0) | if type == "number" then . else 0 end),
+            license: (.license | s),
+            repo: (.repo | s),
+            layout: (.repositoryLayout | s),
+            installable: (.installAvailable == true),
+            installNote: (.installNote | s),
+            trust: (
+              if .sourceType == "builtin" then "builtin"
+              elif .verificationStatus == "verified" then "verified"
+              elif .verificationCoverage == "update-unverified" and .verificationSnapshotStatus == "verified" then "stale"
+              else "unreviewed" end
+            ),
+            verifiedCommit: (
+              if .verificationSnapshotStatus == "verified" then (.listingValidatedCommit | s) else "" end
+            ),
+            upstreamCommit: (.upstreamObservedCommit | s),
+            added: (.addedAt | s),
+            updated: (.repositoryUpdatedAt | s),
+            page: ("https://plugins.omarchy.org/plugin.html?id=" + .id)
+          }
+      ]
+    }
+  ' "$raw" >"$out"
+}
+
+cache_age_hours() {
+  local file="$1" now mtime
+  now=$(date +%s)
+  mtime=$(stat -c %Y "$file")
+  echo $(((now - mtime) / 3600))
+}
+
+fetch_catalog() {
+  need curl jq
+  mkdir -p "$CACHE_DIR"
+  local tmp_raw tmp_index ok=1
+  tmp_raw=$(mktemp "$CACHE_DIR/.catalog.XXXXXX")
+  tmp_index=$(mktemp "$CACHE_DIR/.index.XXXXXX")
+
+  if ! curl --fail --silent --show-error --location \
+    --proto '=https' --proto-redir '=https' --max-redirs 3 \
+    --max-time 60 --max-filesize "$MAX_BYTES" \
+    --user-agent "omaplug/$VERSION" \
+    --output "$tmp_raw" "$CATALOG_URL"; then
+    ok=0
+  elif ! jq -e '(.plugins | type) == "array" and (.plugins | length) > 0' "$tmp_raw" >/dev/null 2>&1; then
+    warn "downloaded catalog is not valid"
+    ok=0
+  elif ! build_index "$tmp_raw" "$tmp_index"; then
+    ok=0
+  fi
+
+  if ((ok)); then
+    mv -f "$tmp_raw" "$RAW_CATALOG"
+    mv -f "$tmp_index" "$INDEX"
+    return 0
+  fi
+  rm -f "$tmp_raw" "$tmp_index"
+  return 1
+}
+
+ensure_index() {
+  if [[ -n ${OMAPLUG_OFFLINE:-} ]]; then
+    [[ -s $INDEX ]] || fail "no cached catalog and OMAPLUG_OFFLINE is set"
+    return
+  fi
+  if [[ -s $INDEX ]] && (($(cache_age_hours "$INDEX") < TTL_HOURS)); then
+    return
+  fi
+  if ! fetch_catalog; then
+    [[ -s $INDEX ]] || fail "could not download the catalog from $CATALOG_URL"
+    warn "could not refresh the catalog; using the cached copy from $(date -r "$INDEX" '+%Y-%m-%d %H:%M')"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Local plugin state
+# ---------------------------------------------------------------------------
+
+# Installed plugins as JSON: [{id, enabled, dir, head, origin}]. Prefers the
+# running shell's view (which knows enabled state) and falls back to the
+# plugins directory when the shell is not reachable.
+installed_json() {
+  local listed="[]" local_dirs="[]" dir id head origin
+  if command -v omarchy >/dev/null 2>&1; then
+    listed=$(timeout 5 omarchy plugin list --json 2>/dev/null || echo "[]")
+    jq -e 'type == "array"' <<<"$listed" >/dev/null 2>&1 || listed="[]"
+  fi
+
+  if [[ -d $PLUGINS_DIR ]]; then
+    local_dirs=$(
+      for dir in "$PLUGINS_DIR"/*/; do
+        [[ -f $dir/manifest.json ]] || continue
+        id=$(jq -r '.id // empty' "$dir/manifest.json" 2>/dev/null) || continue
+        [[ -n $id ]] || continue
+        head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
+        origin=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
+        jq -cn --arg id "$id" --arg dir "${dir%/}" --arg head "$head" --arg origin "$origin" \
+          '{id: $id, dir: $dir, head: $head, origin: $origin}'
+      done | jq -cs '.'
+    )
+  fi
+
+  jq -cn --argjson listed "$listed" --argjson dirs "$local_dirs" '
+    ($listed | map(select(.firstParty != true)) | map({key: .id, value: .}) | from_entries) as $l
+    | [$dirs[] | . + {enabled: ($l[.id].enabled // false)}]
+  '
+}
+
+normalize_repo() {
+  local url="${1%/}"
+  url="${url%.git}"
+  echo "${url,,}"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_refresh() {
+  [[ $# -eq 0 ]] || fail "refresh takes no arguments"
+  [[ -z ${OMAPLUG_OFFLINE:-} ]] || fail "OMAPLUG_OFFLINE is set"
+  fetch_catalog || fail "could not download the catalog from $CATALOG_URL"
+  jq -r '"Catalog refreshed: \(.plugins | length) plugins, generated \(.generatedAt)"' "$INDEX"
+}
+
+trust_badge() {
+  case "$1" in
+  verified) printf '%s' "${C_GREEN}verified${C_RESET}" ;;
+  stale) printf '%s' "${C_YELLOW}stale${C_RESET}" ;;
+  unreviewed) printf '%s' "${C_RED}unreviewed${C_RESET}" ;;
+  builtin) printf '%s' "${C_CYAN}builtin${C_RESET}" ;;
+  *) printf '%s' "$1" ;;
+  esac
+}
+
+cmd_search() {
+  local trust="any" category="" kind="" sort="" limit=20 all=false only_installed=false json=false
+  local -a terms=() tags=()
+
+  while (($# > 0)); do
+    case "$1" in
+    -t | --trust) trust="${2:?--trust needs a value}"; shift 2 ;;
+    -c | --category) category="${2:?--category needs a value}"; shift 2 ;;
+    -k | --kind) kind="${2:?--kind needs a value}"; shift 2 ;;
+    --tag) tags+=("${2:?--tag needs a value}"); shift 2 ;;
+    -s | --sort) sort="${2:?--sort needs a value}"; shift 2 ;;
+    -n | --limit) limit="${2:?--limit needs a value}"; shift 2 ;;
+    -a | --all) all=true; shift ;;
+    -i | --installed) only_installed=true; shift ;;
+    --json) json=true; shift ;;
+    --) shift; terms+=("$@"); break ;;
+    -*) fail "unknown search option: $1" ;;
+    *) terms+=("$1"); shift ;;
+    esac
+  done
+
+  case "$trust" in verified | stale | unreviewed | builtin | any) ;; *) fail "unknown trust level: $trust" ;; esac
+  [[ $limit =~ ^[0-9]+$ ]] || fail "--limit must be a number"
+  if [[ -z $sort ]]; then
+    ((${#terms[@]} > 0)) && sort="relevance" || sort="stars"
+  fi
+  case "$sort" in relevance | stars | updated | added | name) ;; *) fail "unknown sort key: $sort" ;; esac
+
+  ensure_index
+  need jq
+
+  local installed
+  installed=$(installed_json)
+
+  local terms_json tags_json results
+  terms_json=$(jq -cn '$ARGS.positional' --args -- "${terms[@]}")
+  tags_json=$(jq -cn '$ARGS.positional' --args -- "${tags[@]}")
+  results=$(jq -c \
+    --arg trust "$trust" --arg category "$category" --arg kind "$kind" --arg sort "$sort" \
+    --argjson limit "$limit" --argjson all "$all" --argjson onlyInstalled "$only_installed" \
+    --argjson installed "$installed" --argjson rawTerms "$terms_json" --argjson rawTags "$tags_json" '
+      def lc: ascii_downcase;
+      [$rawTerms[] | lc] as $terms
+      | [$rawTags[] | lc] as $tags
+      | ($installed | map({key: .id, value: .}) | from_entries) as $inst
+      | [
+          .plugins[]
+          | . + {installed: ($inst[.id] != null), enabled: ($inst[.id].enabled // false)}
+          | select($all or .installable or .trust == "builtin")
+          | select($trust == "any" or .trust == $trust)
+          | select($category == "" or (.category | lc) == ($category | lc))
+          | select($kind == "" or (.kind | lc) == ($kind | lc))
+          | select(($onlyInstalled | not) or .installed)
+          | (.tags | map(lc)) as $ptags
+          | select(all($tags[]; . as $t | $ptags | index($t)))
+          | ([.name, .id, .description, .author, .category, (.tags | join(" "))] | join(" ") | lc) as $hay
+          | select(all($terms[]; . as $t | $hay | contains($t)))
+          | .score = (
+              [ $terms[] as $t
+                | (if (.name | lc) == $t then 10 elif (.name | lc | contains($t)) then 5 else 0 end)
+                + (if (.id | lc | contains($t)) then 3 else 0 end)
+                + (if ($ptags | index($t)) then 3 else 0 end)
+                + (if (.description | lc | contains($t)) then 1 else 0 end)
+              ] | add // 0
+            )
+        ]
+      | if $sort == "relevance" then sort_by(-.score, -.stars)
+        elif $sort == "stars" then sort_by(-.stars)
+        elif $sort == "updated" then sort_by(.updated) | reverse
+        elif $sort == "added" then sort_by(.added) | reverse
+        else sort_by(.name | lc) end
+      | {total: length, results: (if $limit > 0 then .[:$limit] else . end)}
+    ' "$INDEX")
+
+  if $json; then
+    jq '.results | map(del(.score))' <<<"$results"
+    return
+  fi
+
+  local total shown
+  total=$(jq '.total' <<<"$results")
+  shown=$(jq '.results | length' <<<"$results")
+  if ((total == 0)); then
+    echo "No plugins found."
+    return
+  fi
+
+  local id name stars trust_level installed_flag desc
+  while IFS=$'\t' read -r id name stars trust_level installed_flag desc; do
+    printf '%s%s%s  %s%s%s  ★%s  %s' "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$id" "$C_RESET" "$stars" "$(trust_badge "$trust_level")"
+    [[ $installed_flag == "true" ]] && printf '  %s[installed]%s' "$C_CYAN" "$C_RESET"
+    printf '\n    %s\n' "$desc"
+  done < <(jq -r '.results[] | [.id, .name, .stars, .trust, .installed, (.description | gsub("[\\t\\n\\r]"; " ") | if length > 110 then .[:107] + "..." else . end)] | @tsv' <<<"$results")
+
+  if ((shown < total)); then
+    printf '\n%sShowing %d of %d. Use --limit 0 for all, or narrow with --trust/--category/--tag.%s\n' "$C_DIM" "$shown" "$total" "$C_RESET"
+  fi
+}
+
+lookup() {
+  local id="$1"
+  jq -c --arg id "$id" '.plugins[] | select(.id == $id)' "$INDEX" | head -n 1
+}
+
+cmd_info() {
+  local id="" json=false
+  while (($# > 0)); do
+    case "$1" in
+    --json) json=true; shift ;;
+    -*) fail "unknown info option: $1" ;;
+    *) [[ -z $id ]] || fail "unexpected argument: $1"; id="$1"; shift ;;
+    esac
+  done
+  [[ -n $id ]] || fail "usage: omaplug info <id> [--json]"
+
+  ensure_index
+  local entry installed local_state
+  entry=$(lookup "$id")
+  [[ -n $entry ]] || fail "no plugin with id '$id' (try: omaplug search $id)"
+  installed=$(installed_json)
+  local_state=$(jq -c --arg id "$id" 'map(select(.id == $id))[0] // null' <<<"$installed")
+  entry=$(jq -c --argjson local "$local_state" '
+    . + {
+      installed: ($local != null),
+      enabled: ($local.enabled // false),
+      installedCommit: ($local.head // ""),
+      installCommand: (
+        if .installable then "omaplug install \(.id)" + (if .trust == "unreviewed" then " --allow-unverified" else "" end)
+        else "" end
+      )
+    }
+  ' <<<"$entry")
+
+  if $json; then
+    jq '.' <<<"$entry"
+    return
+  fi
+
+  local trust_level
+  trust_level=$(jq -r '.trust' <<<"$entry")
+  jq -r --arg badge "$(trust_badge "$trust_level")" --arg b "$C_BOLD" --arg d "$C_DIM" --arg r "$C_RESET" '
+    "\($b)\(.name)\($r)  \($d)\(.id)\($r)",
+    "  \(.description)",
+    "",
+    "  Trust      \($badge)",
+    "  Author     \(.author)",
+    "  Category   \(.category) · \(.kind)",
+    "  Tags       \(.tags | join(", "))",
+    "  Stars      \(.stars)",
+    "  License    \(.license)",
+    "  Repo       \(.repo)",
+    "  Page       \(.page)",
+    (if .verifiedCommit != "" then "  Verified   \(.verifiedCommit)" else empty end),
+    (if .upstreamCommit != "" and .upstreamCommit != .verifiedCommit then "  Upstream   \(.upstreamCommit)" else empty end),
+    "  Updated    \(.updated)",
+    "",
+    (if .installed then
+       "  Installed  yes\(if .enabled then ", enabled" else ", disabled" end)\(if .installedCommit != "" then " @ \(.installedCommit[:12])" else "" end)"
+     elif .trust == "builtin" then "  Enable with: omarchy plugin enable \(.id)"
+     elif .installable then "  Install with: \(.installCommand)"
+     else "  Not installable with omarchy plugin add. \(.installNote)" end)
+  ' <<<"$entry"
+}
+
+confirm() {
+  local prompt="$1" answer
+  if command -v gum >/dev/null 2>&1; then
+    gum confirm "$prompt"
+  else
+    read -r -p "$prompt [y/N] " answer
+    [[ $answer == [yY]* ]]
+  fi
+}
+
+cmd_install() {
+  local id="" enable=false section="" latest=false allow_unverified=false dry_run=false yes=false
+  while (($# > 0)); do
+    case "$1" in
+    --enable) enable=true; shift ;;
+    --section) section="${2:?--section needs a value}"; shift 2 ;;
+    --latest) latest=true; shift ;;
+    --allow-unverified) allow_unverified=true; shift ;;
+    --dry-run) dry_run=true; shift ;;
+    -y | --yes) yes=true; shift ;;
+    -*) fail "unknown install option: $1" ;;
+    *) [[ -z $id ]] || fail "unexpected argument: $1"; id="$1"; shift ;;
+    esac
+  done
+  [[ -n $id ]] || fail "usage: omaplug install <id> [--enable] [--yes]"
+  [[ -z $section || $section =~ ^(left|center|right)$ ]] || fail "--section must be left, center, or right"
+  [[ -z $section ]] || enable=true
+
+  need git jq omarchy
+  ensure_index
+
+  local entry
+  entry=$(lookup "$id")
+  [[ -n $entry ]] || fail "no plugin with id '$id' (try: omaplug search $id)"
+
+  local trust repo installable verified_commit name layout
+  trust=$(jq -r '.trust' <<<"$entry")
+  repo=$(jq -r '.repo' <<<"$entry")
+  installable=$(jq -r '.installable' <<<"$entry")
+  verified_commit=$(jq -r '.verifiedCommit' <<<"$entry")
+  name=$(jq -r '.name' <<<"$entry")
+  layout=$(jq -r '.layout' <<<"$entry")
+
+  [[ $trust != "builtin" ]] || fail "'$id' ships with Omarchy; enable it with: omarchy plugin enable $id"
+  [[ $installable == "true" ]] || fail "'$id' cannot be installed with omarchy plugin add: $(jq -r '.installNote' <<<"$entry")"
+  [[ $repo =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "refusing unexpected repository URL: $repo"
+  [[ -z $verified_commit || $verified_commit =~ ^[0-9a-f]{40}$ ]] || fail "refusing malformed verified commit: $verified_commit"
+
+  if [[ -e $PLUGINS_DIR/$id ]]; then
+    fail "'$id' is already installed; update it with: omarchy plugin update $id"
+  fi
+
+  # Decide what code gets installed. A verified snapshot is pinned by default;
+  # anything else needs an explicit opt-in.
+  local pin=""
+  case "$trust" in
+  verified)
+    $latest || pin="$verified_commit"
+    ;;
+  stale)
+    if $latest; then
+      $allow_unverified || fail "'$id' has moved past its verified commit; --latest installs unverified code and needs --allow-unverified"
+    else
+      pin="$verified_commit"
+    fi
+    ;;
+  unreviewed)
+    $allow_unverified || fail "'$id' has never been verified by the marketplace; pass --allow-unverified to install it anyway"
+    ;;
+  esac
+  if [[ -n $pin && $layout != "root-plugin" ]]; then
+    warn "'$id' uses a '$layout' repository layout; installing upstream HEAD without pinning"
+    pin=""
+  fi
+
+  local url="$repo.git"
+  local what
+  if [[ -n $pin ]]; then
+    what="verified commit ${pin:0:12}"
+  else
+    what="upstream HEAD (not verified)"
+  fi
+
+  if $dry_run; then
+    echo "Would install $name ($id)"
+    echo "  from  $url"
+    echo "  at    $what"
+    $enable && echo "  then  omarchy plugin enable $id${section:+ --section $section}"
+    return
+  fi
+
+  if ! $yes; then
+    interactive || fail "refusing to install without confirmation; pass --yes"
+    cat >&2 <<EOF
+
+Plugins run as unsandboxed code inside omarchy-shell.
+
+  Plugin  $name ($id)
+  Trust   $trust
+  Source  $url
+  Code    $what
+
+EOF
+    confirm "Install $id?" || fail "aborted"
+  fi
+
+  # Land it disabled so a pin can be applied before anything runs.
+  omarchy plugin add "$url" --yes >&2 || fail "omarchy plugin add failed"
+
+  local dir="$PLUGINS_DIR/$id"
+  [[ -d $dir ]] || fail "installed, but the plugin id did not match '$id'; check omarchy plugin list"
+
+  if [[ -n $pin ]]; then
+    if ! git -C "$dir" cat-file -e "$pin^{commit}" 2>/dev/null; then
+      git -C "$dir" fetch --quiet origin "$pin" 2>/dev/null ||
+        fail "could not find verified commit $pin upstream; the plugin is installed but disabled at HEAD. Remove it with: omarchy plugin remove $id --yes"
+    fi
+    git -C "$dir" -c advice.detachedHead=false checkout --quiet --detach "$pin" ||
+      fail "could not check out $pin; the plugin is installed but disabled. Remove it with: omarchy plugin remove $id --yes"
+    if ! omarchy plugin validate "$dir" >&2; then
+      fail "the verified commit does not validate against this Omarchy version; the plugin is installed but disabled. Remove it with: omarchy plugin remove $id --yes"
+    fi
+    omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+    echo "Pinned $id to verified commit ${pin:0:12}" >&2
+  fi
+
+  if $enable; then
+    local attempt
+    for ((attempt = 0; attempt < 40; attempt++)); do
+      omarchy plugin list --json 2>/dev/null | jq -e --arg id "$id" 'any(.[]; .id == $id)' >/dev/null && break
+      sleep 0.05
+    done
+    if [[ -n $section ]]; then
+      omarchy plugin enable "$id" --section "$section"
+    else
+      omarchy plugin enable "$id"
+    fi
+  else
+    echo "Installed $id (disabled). Enable it with: omarchy plugin enable $id"
+  fi
+}
+
+cmd_audit() {
+  local json=false strict=false
+  while (($# > 0)); do
+    case "$1" in
+    --json) json=true; shift ;;
+    --strict) strict=true; shift ;;
+    *) fail "unknown audit option: $1" ;;
+    esac
+  done
+
+  ensure_index
+  local installed report
+  installed=$(installed_json)
+
+  report=$(
+    jq -c --argjson installed "$installed" '
+      def norm: ascii_downcase | sub("/+$"; "") | sub("\\.git$"; "");
+      (.plugins | map({key: .id, value: .}) | from_entries) as $cat
+      | [
+          $installed[]
+          | . as $p
+          | $cat[$p.id] as $c
+          | {
+              id: $p.id,
+              enabled: $p.enabled,
+              installedCommit: $p.head,
+              origin: $p.origin,
+              listed: ($c != null),
+              trust: ($c.trust // null),
+              verifiedCommit: ($c.verifiedCommit // ""),
+              repo: ($c.repo // "")
+            }
+          | .status = (
+              if .listed | not then "unlisted"
+              elif .origin != "" and (.origin | norm) != (.repo | norm) then "repo-mismatch"
+              elif .installedCommit == "" then "unknown"
+              elif .verifiedCommit != "" and .installedCommit == .verifiedCommit then "verified"
+              elif .verifiedCommit != "" then "drifted"
+              else "unreviewed" end
+            )
+        ]
+    ' "$INDEX"
+  )
+
+  if $json; then
+    jq '.' <<<"$report"
+  else
+    if [[ $(jq 'length' <<<"$report") == 0 ]]; then
+      echo "No community plugins installed."
+    fi
+    local id enabled status commit verified
+    while IFS=$'\t' read -r id enabled status commit verified; do
+      local label
+      case "$status" in
+      verified) label="${C_GREEN}verified${C_RESET}      running the commit the marketplace verified" ;;
+      drifted) label="${C_YELLOW}drifted${C_RESET}       running ${commit:0:12}, verified is ${verified:0:12}" ;;
+      unreviewed) label="${C_RED}unreviewed${C_RESET}    no verified commit exists" ;;
+      unlisted) label="${C_DIM}unlisted${C_RESET}      not in the marketplace" ;;
+      repo-mismatch) label="${C_RED}repo-mismatch${C_RESET} installed from a different repo than the listing" ;;
+      *) label="unknown       not a git checkout" ;;
+      esac
+      printf '%s%-45s%s %s  %s\n' "$C_BOLD" "$id" "$C_RESET" "$([[ $enabled == true ]] && echo "on " || echo "off")" "$label"
+    done < <(jq -r '.[] | [.id, .enabled, .status, .installedCommit, .verifiedCommit] | @tsv' <<<"$report")
+  fi
+
+  if $strict && jq -e 'any(.[]; .status != "verified")' <<<"$report" >/dev/null; then
+    exit 2
+  fi
+}
+
+cmd_categories() {
+  local json=false
+  [[ ${1:-} == "--json" ]] && json=true
+  ensure_index
+  local data
+  data=$(jq -c '
+    def counts(f): [.plugins[] | f] | group_by(.) | map({name: .[0], count: length}) | sort_by(-.count);
+    {
+      categories: counts(.category | select(. != "")),
+      kinds: counts(.kind | select(. != "")),
+      trust: counts(.trust),
+      tags: ([.plugins[].tags[] | ascii_downcase] | group_by(.) | map({name: .[0], count: length}) | sort_by(-.count) | .[:40])
+    }
+  ' "$INDEX")
+  if $json; then
+    jq '.' <<<"$data"
+    return
+  fi
+  jq -r --arg b "$C_BOLD" --arg r "$C_RESET" '
+    def section(title; rows): "\($b)\(title)\($r)", (rows[] | "  \(.count | tostring | (" " * (5 - length)) + .)  \(.name)"), "";
+    section("Categories"; .categories),
+    section("Kinds"; .kinds),
+    section("Trust"; .trust),
+    section("Top tags"; .tags)
+  ' <<<"$data"
+}
+
+skill_source() {
+  local candidate
+  for candidate in \
+    "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/SKILL.md" \
+    "/usr/share/omaplug/SKILL.md" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omaplug/SKILL.md"; do
+    [[ -f $candidate ]] && { echo "$candidate"; return; }
+  done
+  fail "SKILL.md not found; reinstall omaplug"
+}
+
+# Agent skill for Claude Code and other agents that read SKILL.md files.
+cmd_skill() {
+  local src target
+  src=$(skill_source)
+  case "${1:-}" in
+  "") cat "$src" ;;
+  --install)
+    target="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/omaplug"
+    mkdir -p "$target"
+    cp -f "$src" "$target/SKILL.md"
+    echo "Installed skill to $target/SKILL.md"
+    ;;
+  *) fail "usage: omaplug skill [--install]" ;;
+  esac
+}
+
+main() {
+  local cmd="${1:-}"
+  (($# > 0)) && shift
+  case "$cmd" in
+  search | s) cmd_search "$@" ;;
+  info | show) cmd_info "$@" ;;
+  install | add) cmd_install "$@" ;;
+  audit) cmd_audit "$@" ;;
+  categories | cats) cmd_categories "$@" ;;
+  refresh | update) cmd_refresh "$@" ;;
+  skill) cmd_skill "$@" ;;
+  -v | --version | version) echo "omaplug $VERSION" ;;
+  "" | -h | --help | help) usage ;;
+  *) fail "unknown command: $cmd (see omaplug --help)" ;;
+  esac
+}
+
+main "$@"
