@@ -47,7 +47,7 @@ then enables.
 **Arch package (from the latest release):**
 
 ```bash
-sudo pacman -U https://github.com/stewartjarod/omarket/releases/download/v0.3.0/omarket-0.3.0-1-any.pkg.tar.zst
+sudo pacman -U https://github.com/stewartjarod/omarket/releases/download/v0.3.1/omarket-0.3.1-1-any.pkg.tar.zst
 ```
 
 **Build it yourself with makepkg:**

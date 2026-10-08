@@ -10,13 +10,19 @@ description: Find, inspect, install, and audit Omarchy shell plugins (bar widget
 ## Find a plugin
 
 ```bash
-omarket search <words...> --json            # all words must match name/id/tags/description
+omarket search <words...> --json            # the user's words are fine; filler words are ignored
 omarket search spotify --trust verified --json
-omarket search --category Productivity --sort stars -n 10 --json
+omarket search --category Productivity -n 10 --json   # no query: most popular first
 omarket categories --json                    # valid categories, kinds, top tags
 ```
 
-Each result has `id`, `name`, `description`, `trust`, `copies`, `views`, `hearts`, `stars`, `kind`, `installed`, `enabled`. `copies` (install commands copied on the marketplace site) is the best available signal of how many people use a plugin. Pick by relevance first, then prefer `trust: "verified"`, then higher `copies`.
+- Results must match every word; if nothing does, omarket falls back to partial matches and says so on **stderr**. Treat partial matches as weaker.
+- Only the top 20 are returned by default. A `showing N of M` note on stderr means there are more: narrow the query or pass `--limit 0`.
+- Listings that cannot be installed with `omarchy plugin add` (manual-setup suites, etc.) are hidden unless you pass `--all`.
+
+Each result has `id`, `name`, `description`, `trust`, `copies`, `views`, `hearts`, `stars`, `kind`, `installable`, `installed`, `enabled`, `installedAs`. `copies` (install commands copied on the marketplace site) is the best available signal of how many people use a plugin. Pick by relevance first, then prefer `trust: "verified"`, then higher `copies`.
+
+If `installedAs` differs from `id`, the user already runs that plugin under another id (usually their own fork). Do not install the listing again.
 
 ## Inspect before installing
 
@@ -24,7 +30,7 @@ Each result has `id`, `name`, `description`, `trust`, `copies`, `views`, `hearts
 omarket info <id> --json
 ```
 
-Show the user the name, description, trust level, and repo before installing anything.
+Show the user the name, description, trust level, usage, and repo before installing anything. For an installed id the marketplace does not list, `info` returns `listed: false` and `forkOf` (the listing it was forked from, if any).
 
 ## Trust levels
 
@@ -40,11 +46,13 @@ Never pass `--latest` or `--allow-unverified` without the user's explicit approv
 ```bash
 omarket install <id> --yes                       # installed disabled, pinned to verified commit
 omarket install <id> --yes --enable              # and enable it
-omarket install <id> --yes --section right       # bar widget into a bar section (implies --enable)
+omarket install <id> --yes --section right       # bar widgets only: place it in a bar section (implies --enable)
 omarket install <id> --dry-run                   # show what would happen
 ```
 
 `--yes` is required when no terminal is attached. Confirm with `omarchy plugin list --json`.
+
+Install refuses when the plugin is already installed, including as a fork under another id, and when `--section` is used on something that is not a bar widget. Relay the error to the user rather than working around it.
 
 ## Audit installed plugins
 
