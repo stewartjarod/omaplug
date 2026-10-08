@@ -1,15 +1,17 @@
 # Maintainer: Jarod Stewart <stewartjarod at gmail dot com>
-pkgname=omaplug
-pkgver=0.2.0
+pkgname=omarket
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Search, install, and audit Omarchy shell plugins from the community marketplace, pinned to verified commits"
 arch=('any')
-url="https://github.com/stewartjarod/omaplug"
+url="https://github.com/stewartjarod/omarket"
 license=('MIT')
 depends=('bash' 'jq' 'curl' 'git' 'coreutils')
 optdepends=('gum: nicer confirmation prompts')
+conflicts=('omaplug')
+replaces=('omaplug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('fc453398310a714c539eab314c4952755b300ff74a96177c256a13fea7b962ed')
+sha256sums=('SKIP')
 
 package() {
   cd "$pkgname-$pkgver"

@@ -1,19 +1,19 @@
 ---
-name: omaplug
+name: omarket
 description: Find, inspect, install, and audit Omarchy shell plugins (bar widgets, overlays, panels, services) from the community marketplace at plugins.omarchy.org. Use when the user wants a new bar widget or desktop feature on Omarchy, asks "is there a plugin for X", wants to install a plugin by name, or wants to check whether installed plugins are running verified code.
 ---
 
-# omaplug
+# omarket
 
-`omaplug` searches the Omarchy plugin marketplace (5,000+ plugins) and installs plugins pinned to the exact commit the marketplace verified. Always use `--json` when reading output.
+`omarket` searches the Omarchy plugin marketplace (5,000+ plugins) and installs plugins pinned to the exact commit the marketplace verified. Always use `--json` when reading output.
 
 ## Find a plugin
 
 ```bash
-omaplug search <words...> --json            # all words must match name/id/tags/description
-omaplug search spotify --trust verified --json
-omaplug search --category Productivity --sort stars -n 10 --json
-omaplug categories --json                    # valid categories, kinds, top tags
+omarket search <words...> --json            # all words must match name/id/tags/description
+omarket search spotify --trust verified --json
+omarket search --category Productivity --sort stars -n 10 --json
+omarket categories --json                    # valid categories, kinds, top tags
 ```
 
 Each result has `id`, `name`, `description`, `trust`, `copies`, `views`, `hearts`, `stars`, `kind`, `installed`, `enabled`. `copies` (install commands copied on the marketplace site) is the best available signal of how many people use a plugin. Pick by relevance first, then prefer `trust: "verified"`, then higher `copies`.
@@ -21,7 +21,7 @@ Each result has `id`, `name`, `description`, `trust`, `copies`, `views`, `hearts
 ## Inspect before installing
 
 ```bash
-omaplug info <id> --json
+omarket info <id> --json
 ```
 
 Show the user the name, description, trust level, and repo before installing anything.
@@ -29,7 +29,7 @@ Show the user the name, description, trust level, and repo before installing any
 ## Trust levels
 
 - `verified` — the marketplace verified this exact commit. Safe default.
-- `stale` — an older commit was verified; upstream has moved. `omaplug install` pins the verified commit automatically.
+- `stale` — an older commit was verified; upstream has moved. `omarket install` pins the verified commit automatically.
 - `unreviewed` — never verified. **Ask the user before installing**, then pass `--allow-unverified`.
 - `builtin` — ships with Omarchy. Do not install; run `omarchy plugin enable <id>`.
 
@@ -38,10 +38,10 @@ Never pass `--latest` or `--allow-unverified` without the user's explicit approv
 ## Install
 
 ```bash
-omaplug install <id> --yes                       # installed disabled, pinned to verified commit
-omaplug install <id> --yes --enable              # and enable it
-omaplug install <id> --yes --section right       # bar widget into a bar section (implies --enable)
-omaplug install <id> --dry-run                   # show what would happen
+omarket install <id> --yes                       # installed disabled, pinned to verified commit
+omarket install <id> --yes --enable              # and enable it
+omarket install <id> --yes --section right       # bar widget into a bar section (implies --enable)
+omarket install <id> --dry-run                   # show what would happen
 ```
 
 `--yes` is required when no terminal is attached. Confirm with `omarchy plugin list --json`.
@@ -49,7 +49,7 @@ omaplug install <id> --dry-run                   # show what would happen
 ## Audit installed plugins
 
 ```bash
-omaplug audit --json
+omarket audit --json
 ```
 
 Statuses:
@@ -65,4 +65,4 @@ Statuses:
 
 ## Manage installed plugins
 
-Use the Omarchy CLI: `omarchy plugin enable|disable|remove|update <id>`. Note `omarchy plugin update` moves to upstream HEAD, which may not be verified; run `omaplug audit` afterwards.
+Use the Omarchy CLI: `omarchy plugin enable|disable|remove|update <id>`. Note `omarchy plugin update` moves to upstream HEAD, which may not be verified; run `omarket audit` afterwards.

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# omaplug — search, inspect, install, and audit Omarchy shell plugins from the
+# omarket — search, inspect, install, and audit Omarchy shell plugins from the
 # community marketplace (https://plugins.omarchy.org).
 #
 # Built for people and coding agents alike: every read command takes --json,
@@ -9,15 +9,15 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
-CATALOG_URL="${OMAPLUG_CATALOG_URL:-https://plugins.omarchy.org/catalog.json}"
-STATS_URL="${OMAPLUG_STATS_URL:-https://api.omarchyplugins.com/v1/stats}"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omaplug"
+CATALOG_URL="${OMARKET_CATALOG_URL:-https://plugins.omarchy.org/catalog.json}"
+STATS_URL="${OMARKET_STATS_URL:-https://api.omarchyplugins.com/v1/stats}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarket"
 RAW_CATALOG="$CACHE_DIR/catalog.json"
 RAW_STATS="$CACHE_DIR/stats.json"
 INDEX="$CACHE_DIR/index.json"
-TTL_HOURS="${OMAPLUG_TTL_HOURS:-24}"
+TTL_HOURS="${OMARKET_TTL_HOURS:-24}"
 MAX_BYTES=$((64 * 1024 * 1024))
 PLUGINS_DIR="$HOME/.config/omarchy/plugins"
 
@@ -29,12 +29,12 @@ else
 fi
 
 fail() {
-  echo "omaplug: $*" >&2
+  echo "omarket: $*" >&2
   exit 1
 }
 
 warn() {
-  echo "omaplug: $*" >&2
+  echo "omarket: $*" >&2
 }
 
 interactive() {
@@ -50,16 +50,16 @@ need() {
 
 usage() {
   cat <<EOF
-omaplug $VERSION — Omarchy plugin marketplace from the command line
+omarket $VERSION — Omarchy plugin marketplace from the command line
 
 Usage:
-  omaplug search [query...] [options]   Search the marketplace
-  omaplug info <id> [--json]            Show one plugin in detail
-  omaplug install <id> [options]        Install a plugin (pinned to its verified commit)
-  omaplug audit [--json] [--strict]     Check installed plugins against what was verified
-  omaplug categories [--json]           List categories, kinds, and top tags
-  omaplug refresh                       Re-download the marketplace catalog
-  omaplug skill [--install]             Print (or install) the agent skill for coding agents
+  omarket search [query...] [options]   Search the marketplace
+  omarket info <id> [--json]            Show one plugin in detail
+  omarket install <id> [options]        Install a plugin (pinned to its verified commit)
+  omarket audit [--json] [--strict]     Check installed plugins against what was verified
+  omarket categories [--json]           List categories, kinds, and top tags
+  omarket refresh                       Re-download the marketplace catalog
+  omarket skill [--install]             Print (or install) the agent skill for coding agents
 
 Search options:
   -t, --trust <level>     verified | stale | unreviewed | builtin | any (default: any)
@@ -83,20 +83,20 @@ Install options:
 
 Usage numbers come from the marketplace website: views of a listing, copies
 of its install command (the closest thing to an install count), and hearts.
-Installs made with omarchy plugin add or omaplug are not counted.
+Installs made with omarchy plugin add or omarket are not counted.
 
 Trust levels:
   verified     The marketplace verified the current upstream commit.
-  stale        A commit was verified, but upstream has moved past it. omaplug
+  stale        A commit was verified, but upstream has moved past it. omarket
                installs the verified commit unless you pass --latest.
   unreviewed   No verified commit exists.
   builtin      Ships with Omarchy; enable it with omarchy plugin enable.
 
 Environment:
-  OMAPLUG_CATALOG_URL   Catalog to read (default: $CATALOG_URL)
-  OMAPLUG_STATS_URL     Usage stats to read (default: $STATS_URL)
-  OMAPLUG_TTL_HOURS     Hours before the cached catalog is refreshed (default: 24)
-  OMAPLUG_OFFLINE=1     Never fetch; use the cached catalog only
+  OMARKET_CATALOG_URL   Catalog to read (default: $CATALOG_URL)
+  OMARKET_STATS_URL     Usage stats to read (default: $STATS_URL)
+  OMARKET_TTL_HOURS     Hours before the cached catalog is refreshed (default: 24)
+  OMARKET_OFFLINE=1     Never fetch; use the cached catalog only
 EOF
 }
 
@@ -104,7 +104,7 @@ EOF
 # Catalog cache
 # ---------------------------------------------------------------------------
 
-# Reduce the raw marketplace catalog to the fields omaplug uses, with a derived
+# Reduce the raw marketplace catalog to the fields omarket uses, with a derived
 # trust level, so every later query parses a small file instead of ~5 MB.
 build_index() {
   local raw="$1" stats="$2" out="$3"
@@ -165,7 +165,7 @@ curl_get() {
   curl --fail --silent --show-error --location \
     --proto '=https' --proto-redir '=https' --max-redirs 3 \
     --max-time 60 --max-filesize "$MAX_BYTES" \
-    --user-agent "omaplug/$VERSION" \
+    --user-agent "omarket/$VERSION" \
     --output "$2" "$1"
 }
 
@@ -207,11 +207,11 @@ fetch_catalog() {
 }
 
 ensure_index() {
-  if [[ -n ${OMAPLUG_OFFLINE:-} ]]; then
-    [[ -s $INDEX ]] || fail "no cached catalog and OMAPLUG_OFFLINE is set"
+  if [[ -n ${OMARKET_OFFLINE:-} ]]; then
+    [[ -s $INDEX ]] || fail "no cached catalog and OMARKET_OFFLINE is set"
     return
   fi
-  # An index written by an older omaplug lacks fields this one sorts on.
+  # An index written by an older omarket lacks fields this one sorts on.
   if [[ -s $INDEX ]] && (($(cache_age_hours "$INDEX") < TTL_HOURS)) &&
     jq -e '.indexVersion == 2' "$INDEX" >/dev/null 2>&1; then
     return
@@ -269,7 +269,7 @@ normalize_repo() {
 
 cmd_refresh() {
   [[ $# -eq 0 ]] || fail "refresh takes no arguments"
-  [[ -z ${OMAPLUG_OFFLINE:-} ]] || fail "OMAPLUG_OFFLINE is set"
+  [[ -z ${OMARKET_OFFLINE:-} ]] || fail "OMARKET_OFFLINE is set"
   fetch_catalog || fail "could not download the catalog from $CATALOG_URL"
   jq -r '"Catalog refreshed: \(.plugins | length) plugins, generated \(.generatedAt)"' "$INDEX"
 }
@@ -402,12 +402,12 @@ cmd_info() {
     *) [[ -z $id ]] || fail "unexpected argument: $1"; id="$1"; shift ;;
     esac
   done
-  [[ -n $id ]] || fail "usage: omaplug info <id> [--json]"
+  [[ -n $id ]] || fail "usage: omarket info <id> [--json]"
 
   ensure_index
   local entry installed local_state
   entry=$(lookup "$id")
-  [[ -n $entry ]] || fail "no plugin with id '$id' (try: omaplug search $id)"
+  [[ -n $entry ]] || fail "no plugin with id '$id' (try: omarket search $id)"
   installed=$(installed_json)
   local_state=$(jq -c --arg id "$id" 'map(select(.id == $id))[0] // null' <<<"$installed")
   entry=$(jq -c --argjson local "$local_state" '
@@ -416,7 +416,7 @@ cmd_info() {
       enabled: ($local.enabled // false),
       installedCommit: ($local.head // ""),
       installCommand: (
-        if .installable then "omaplug install \(.id)" + (if .trust == "unreviewed" then " --allow-unverified" else "" end)
+        if .installable then "omarket install \(.id)" + (if .trust == "unreviewed" then " --allow-unverified" else "" end)
         else "" end
       )
     }
@@ -478,7 +478,7 @@ cmd_install() {
     *) [[ -z $id ]] || fail "unexpected argument: $1"; id="$1"; shift ;;
     esac
   done
-  [[ -n $id ]] || fail "usage: omaplug install <id> [--enable] [--yes]"
+  [[ -n $id ]] || fail "usage: omarket install <id> [--enable] [--yes]"
   [[ -z $section || $section =~ ^(left|center|right)$ ]] || fail "--section must be left, center, or right"
   [[ -z $section ]] || enable=true
 
@@ -487,7 +487,7 @@ cmd_install() {
 
   local entry
   entry=$(lookup "$id")
-  [[ -n $entry ]] || fail "no plugin with id '$id' (try: omaplug search $id)"
+  [[ -n $entry ]] || fail "no plugin with id '$id' (try: omarket search $id)"
 
   local trust repo installable verified_commit name layout
   trust=$(jq -r '.trust' <<<"$entry")
@@ -762,11 +762,11 @@ skill_source() {
   local candidate
   for candidate in \
     "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/SKILL.md" \
-    "/usr/share/omaplug/SKILL.md" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/omaplug/SKILL.md"; do
+    "/usr/share/omarket/SKILL.md" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omarket/SKILL.md"; do
     [[ -f $candidate ]] && { echo "$candidate"; return; }
   done
-  fail "SKILL.md not found; reinstall omaplug"
+  fail "SKILL.md not found; reinstall omarket"
 }
 
 # Agent skill for Claude Code and other agents that read SKILL.md files.
@@ -776,12 +776,12 @@ cmd_skill() {
   case "${1:-}" in
   "") cat "$src" ;;
   --install)
-    target="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/omaplug"
+    target="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/omarket"
     mkdir -p "$target"
     cp -f "$src" "$target/SKILL.md"
     echo "Installed skill to $target/SKILL.md"
     ;;
-  *) fail "usage: omaplug skill [--install]" ;;
+  *) fail "usage: omarket skill [--install]" ;;
   esac
 }
 
@@ -796,9 +796,9 @@ main() {
   categories | cats) cmd_categories "$@" ;;
   refresh | update) cmd_refresh "$@" ;;
   skill) cmd_skill "$@" ;;
-  -v | --version | version) echo "omaplug $VERSION" ;;
+  -v | --version | version) echo "omarket $VERSION" ;;
   "" | -h | --help | help) usage ;;
-  *) fail "unknown command: $cmd (see omaplug --help)" ;;
+  *) fail "unknown command: $cmd (see omarket --help)" ;;
   esac
 }
 
