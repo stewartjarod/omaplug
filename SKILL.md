@@ -16,7 +16,7 @@ omaplug search --category Productivity --sort stars -n 10 --json
 omaplug categories --json                    # valid categories, kinds, top tags
 ```
 
-Each result has `id`, `name`, `description`, `trust`, `stars`, `kind`, `installed`, `enabled`. Pick by relevance first, then prefer `trust: "verified"`, then stars.
+Each result has `id`, `name`, `description`, `trust`, `copies`, `views`, `hearts`, `stars`, `kind`, `installed`, `enabled`. `copies` (install commands copied on the marketplace site) is the best available signal of how many people use a plugin. Pick by relevance first, then prefer `trust: "verified"`, then higher `copies`.
 
 ## Inspect before installing
 

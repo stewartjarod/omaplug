@@ -9,11 +9,13 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 CATALOG_URL="${OMAPLUG_CATALOG_URL:-https://plugins.omarchy.org/catalog.json}"
+STATS_URL="${OMAPLUG_STATS_URL:-https://api.omarchyplugins.com/v1/stats}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omaplug"
 RAW_CATALOG="$CACHE_DIR/catalog.json"
+RAW_STATS="$CACHE_DIR/stats.json"
 INDEX="$CACHE_DIR/index.json"
 TTL_HOURS="${OMAPLUG_TTL_HOURS:-24}"
 MAX_BYTES=$((64 * 1024 * 1024))
@@ -66,8 +68,8 @@ Search options:
       --tag <tag>         Filter by tag (repeatable)
   -a, --all               Include listings that cannot be installed with omarchy plugin add
   -i, --installed         Only plugins that are installed here
-  -s, --sort <key>        relevance | stars | updated | added | name
-                          (default: relevance with a query, stars without)
+  -s, --sort <key>        relevance | popular | views | hearts | stars | updated | added | name
+                          (default: relevance with a query, popular without)
   -n, --limit <n>         Max results (default: 20, 0 for no limit)
       --json              Machine-readable output
 
@@ -79,6 +81,10 @@ Install options:
       --dry-run           Print what would happen and exit
   -y, --yes               Do not prompt (required when no terminal is attached)
 
+Usage numbers come from the marketplace website: views of a listing, copies
+of its install command (the closest thing to an install count), and hearts.
+Installs made with omarchy plugin add or omaplug are not counted.
+
 Trust levels:
   verified     The marketplace verified the current upstream commit.
   stale        A commit was verified, but upstream has moved past it. omaplug
@@ -88,6 +94,7 @@ Trust levels:
 
 Environment:
   OMAPLUG_CATALOG_URL   Catalog to read (default: $CATALOG_URL)
+  OMAPLUG_STATS_URL     Usage stats to read (default: $STATS_URL)
   OMAPLUG_TTL_HOURS     Hours before the cached catalog is refreshed (default: 24)
   OMAPLUG_OFFLINE=1     Never fetch; use the cached catalog only
 EOF
@@ -100,10 +107,13 @@ EOF
 # Reduce the raw marketplace catalog to the fields omaplug uses, with a derived
 # trust level, so every later query parses a small file instead of ~5 MB.
 build_index() {
-  local raw="$1" out="$2"
-  jq -c '
+  local raw="$1" stats="$2" out="$3"
+  jq -c --slurpfile stats "$stats" '
     def s: if type == "string" then . else "" end;
-    {
+    def n: if type == "number" and . >= 0 then floor else 0 end;
+    ($stats[0].plugins // {} | if type == "object" then . else {} end) as $usage
+    | {
+      indexVersion: 2,
       generatedAt: (.generatedAt | s),
       plugins: [
         .plugins[]
@@ -117,6 +127,9 @@ build_index() {
             kind: (.kind | s),
             tags: ([(.tags // [])[] | select(type == "string")]),
             stars: ((.stars // 0) | if type == "number" then . else 0 end),
+            views: ($usage[.id].views | n),
+            copies: ($usage[.id].copies | n),
+            hearts: ($usage[.id].hearts | n),
             license: (.license | s),
             repo: (.repo | s),
             layout: (.repositoryLayout | s),
@@ -148,23 +161,39 @@ cache_age_hours() {
   echo $(((now - mtime) / 3600))
 }
 
-fetch_catalog() {
-  need curl jq
-  mkdir -p "$CACHE_DIR"
-  local tmp_raw tmp_index ok=1
-  tmp_raw=$(mktemp "$CACHE_DIR/.catalog.XXXXXX")
-  tmp_index=$(mktemp "$CACHE_DIR/.index.XXXXXX")
-
-  if ! curl --fail --silent --show-error --location \
+curl_get() {
+  curl --fail --silent --show-error --location \
     --proto '=https' --proto-redir '=https' --max-redirs 3 \
     --max-time 60 --max-filesize "$MAX_BYTES" \
     --user-agent "omaplug/$VERSION" \
-    --output "$tmp_raw" "$CATALOG_URL"; then
+    --output "$2" "$1"
+}
+
+fetch_catalog() {
+  need curl jq
+  mkdir -p "$CACHE_DIR"
+  local tmp_raw tmp_stats tmp_index ok=1
+  tmp_raw=$(mktemp "$CACHE_DIR/.catalog.XXXXXX")
+  tmp_stats=$(mktemp "$CACHE_DIR/.stats.XXXXXX")
+  tmp_index=$(mktemp "$CACHE_DIR/.index.XXXXXX")
+
+  # Usage stats are a nice-to-have: if they cannot be fetched, keep the last
+  # good copy, or index without them.
+  if curl_get "$STATS_URL" "$tmp_stats" &&
+    jq -e '(.plugins | type) == "object"' "$tmp_stats" >/dev/null 2>&1; then
+    mv -f "$tmp_stats" "$RAW_STATS"
+  else
+    rm -f "$tmp_stats"
+    warn "could not fetch usage stats; popularity numbers may be missing or old"
+  fi
+  [[ -s $RAW_STATS ]] || echo '{"plugins":{}}' >"$RAW_STATS"
+
+  if ! curl_get "$CATALOG_URL" "$tmp_raw"; then
     ok=0
   elif ! jq -e '(.plugins | type) == "array" and (.plugins | length) > 0' "$tmp_raw" >/dev/null 2>&1; then
     warn "downloaded catalog is not valid"
     ok=0
-  elif ! build_index "$tmp_raw" "$tmp_index"; then
+  elif ! build_index "$tmp_raw" "$RAW_STATS" "$tmp_index"; then
     ok=0
   fi
 
@@ -182,7 +211,9 @@ ensure_index() {
     [[ -s $INDEX ]] || fail "no cached catalog and OMAPLUG_OFFLINE is set"
     return
   fi
-  if [[ -s $INDEX ]] && (($(cache_age_hours "$INDEX") < TTL_HOURS)); then
+  # An index written by an older omaplug lacks fields this one sorts on.
+  if [[ -s $INDEX ]] && (($(cache_age_hours "$INDEX") < TTL_HOURS)) &&
+    jq -e '.indexVersion == 2' "$INDEX" >/dev/null 2>&1; then
     return
   fi
   if ! fetch_catalog; then
@@ -276,9 +307,9 @@ cmd_search() {
   case "$trust" in verified | stale | unreviewed | builtin | any) ;; *) fail "unknown trust level: $trust" ;; esac
   [[ $limit =~ ^[0-9]+$ ]] || fail "--limit must be a number"
   if [[ -z $sort ]]; then
-    ((${#terms[@]} > 0)) && sort="relevance" || sort="stars"
+    ((${#terms[@]} > 0)) && sort="relevance" || sort="popular"
   fi
-  case "$sort" in relevance | stars | updated | added | name) ;; *) fail "unknown sort key: $sort" ;; esac
+  case "$sort" in relevance | popular | views | hearts | stars | updated | added | name) ;; *) fail "unknown sort key: $sort" ;; esac
 
   ensure_index
   need jq
@@ -316,9 +347,12 @@ cmd_search() {
                 + (if ($ptags | index($t)) then 3 else 0 end)
                 + (if (.description | lc | contains($t)) then 1 else 0 end)
               ] | add // 0
-            )
+            ) + ((.copies + 1) | log10)
         ]
-      | if $sort == "relevance" then sort_by(-.score, -.stars)
+      | if $sort == "relevance" then sort_by(-.score, -.copies, -.stars)
+        elif $sort == "popular" then sort_by(-.copies, -.views)
+        elif $sort == "views" then sort_by(-.views)
+        elif $sort == "hearts" then sort_by(-.hearts)
         elif $sort == "stars" then sort_by(-.stars)
         elif $sort == "updated" then sort_by(.updated) | reverse
         elif $sort == "added" then sort_by(.added) | reverse
@@ -339,12 +373,14 @@ cmd_search() {
     return
   fi
 
-  local id name stars trust_level installed_flag desc
-  while IFS=$'\t' read -r id name stars trust_level installed_flag desc; do
-    printf '%s%s%s  %s%s%s  ★%s  %s' "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$id" "$C_RESET" "$stars" "$(trust_badge "$trust_level")"
+  local id name copies hearts trust_level installed_flag desc
+  while IFS=$'\t' read -r id name copies hearts trust_level installed_flag desc; do
+    printf '%s%s%s  %s%s%s  %s ↓%s ♥%s%s  %s' "$C_BOLD" "$name" "$C_RESET" "$C_DIM" "$id" "$C_RESET" \
+      "$C_DIM" "$copies" "$hearts" "$C_RESET" "$(trust_badge "$trust_level")"
     [[ $installed_flag == "true" ]] && printf '  %s[installed]%s' "$C_CYAN" "$C_RESET"
     printf '\n    %s\n' "$desc"
-  done < <(jq -r '.results[] | [.id, .name, .stars, .trust, .installed, (.description | gsub("[\\t\\n\\r]"; " ") | if length > 110 then .[:107] + "..." else . end)] | @tsv' <<<"$results")
+  done < <(jq -r 'def human: if . >= 1000 then "\(. / 100 | floor / 10)k" else tostring end;
+    .results[] | [.id, .name, (.copies | human), (.hearts | human), .trust, .installed, (.description | gsub("[\\t\\n\\r]"; " ") | if length > 110 then .[:107] + "..." else . end)] | @tsv' <<<"$results")
 
   if ((shown < total)); then
     printf '\n%sShowing %d of %d. Use --limit 0 for all, or narrow with --trust/--category/--tag.%s\n' "$C_DIM" "$shown" "$total" "$C_RESET"
@@ -400,7 +436,8 @@ cmd_info() {
     "  Author     \(.author)",
     "  Category   \(.category) · \(.kind)",
     "  Tags       \(.tags | join(", "))",
-    "  Stars      \(.stars)",
+    "  Usage      \(.copies) install copies · \(.views) views · \(.hearts) hearts",
+    "  Stars      \(.stars) on GitHub",
     "  License    \(.license)",
     "  Repo       \(.repo)",
     "  Page       \(.page)",

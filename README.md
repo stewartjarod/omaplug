@@ -78,10 +78,19 @@ omaplug skill [--install]             Print (or install) the agent skill
 
 Search filters: `--trust`, `--category`, `--kind`, `--tag`, `--installed`,
 `--all` (include listings that can't be installed with `omarchy plugin add`),
-`--sort relevance|stars|updated|added|name`, `--limit`.
+`--sort relevance|popular|views|hearts|stars|updated|added|name`, `--limit`.
 
 Install options: `--enable`, `--section left|center|right`, `--latest`,
 `--allow-unverified`, `--dry-run`, `--yes`.
+
+### Popularity
+
+Results show **↓ copies** and **♥ hearts** from the marketplace website's
+public stats (`api.omarchyplugins.com/v1/stats`). A copy means someone copied
+the install command from the listing — the closest thing to an install count
+that exists. Installs made directly with `omarchy plugin add` (or omaplug) are
+not counted, and omaplug never reports anything back. `info` also shows
+listing views and GitHub stars.
 
 `audit --strict` exits `2` if anything installed is not running a verified
 commit — useful in a hook or a cron job.
